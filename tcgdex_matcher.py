@@ -1,5 +1,9 @@
 """Correspondance stricte numéro/édition/variante avec TCGdex en français."""
 
+from functools import lru_cache
+import json
+import os
+from pathlib import Path
 import re
 import socket
 import time
@@ -122,7 +126,90 @@ def selectionner_variante(carte, titre):
     return correspondances[0] if len(correspondances) == 1 else None
 
 
+@lru_cache(maxsize=2)
+def charger_index_local(chemin):
+    with Path(chemin).open("r", encoding="utf-8") as fichier:
+        return json.load(fichier)
+
+
+def carte_depuis_index(carte_compacte, edition, local_id, langue):
+    noms_attaques = (carte_compacte.get("attacks") or {}).get(langue) or []
+    noms_talents = (carte_compacte.get("abilities") or {}).get(langue) or []
+    variantes = []
+    for variante in carte_compacte.get("variants") or []:
+        variante_api = {
+            "type": variante.get("type"),
+            "subtype": variante.get("subtype"),
+            "size": variante.get("size"),
+            "stamp": variante.get("stamp") or [],
+            "foil": variante.get("foil"),
+        }
+        if variante.get("cm"):
+            variante_api["pricing"] = {
+                "cardmarket": {"idProduct": int(variante["cm"])}
+            }
+        variantes.append(variante_api)
+
+    carte = {
+        "id": f"{edition['id']}-{local_id}",
+        "localId": local_id,
+        "name": (carte_compacte.get("name") or {}).get(langue),
+        "set": {
+            "id": edition["id"],
+            "name": (edition.get("name") or {}).get(langue),
+        },
+        "attacks": [{"name": nom} for nom in noms_attaques],
+        "abilities": [{"name": nom} for nom in noms_talents],
+        "variants_detailed": variantes,
+    }
+    if carte_compacte.get("cm"):
+        carte["pricing"] = {
+            "cardmarket": {"idProduct": int(carte_compacte["cm"])}
+        }
+    return carte
+
+
+def chercher_carte_index(titre, chemin_index):
+    numero = extraire_numero(titre)
+    if not numero:
+        return None
+    numero_local, total_officiel = numero
+    index = charger_index_local(str(Path(chemin_index).resolve()))
+    correspondances = []
+    for edition in (index.get("sets") or {}).get(str(total_officiel), []):
+        carte_compacte = None
+        local_id = None
+        for variante_numero in variantes_numero(numero_local, total_officiel):
+            carte_compacte = (edition.get("cards") or {}).get(variante_numero)
+            if carte_compacte:
+                local_id = variante_numero
+                break
+        if not carte_compacte:
+            continue
+        carte = carte_depuis_index(carte_compacte, edition, local_id, "fr")
+        if not nom_present(titre, carte.get("name")):
+            continue
+        variante = selectionner_variante(carte, titre)
+        if not variante:
+            continue
+        carte_anglaise = carte_depuis_index(carte_compacte, edition, local_id, "en")
+        prix_variante = variante["pricing"]["cardmarket"]
+        correspondances.append(
+            {
+                "carte": carte,
+                "carte_anglaise": carte_anglaise,
+                "variante": variante,
+                "id_product_cardmarket": int(prix_variante["idProduct"]),
+            }
+        )
+    return correspondances[0] if len(correspondances) == 1 else None
+
+
 def chercher_carte(titre, session=requests, timeout=15):
+    chemin_index = os.environ.get("TCGDEX_INDEX_FILE")
+    if chemin_index and Path(chemin_index).is_file():
+        return chercher_carte_index(titre, chemin_index)
+
     numero = extraire_numero(titre)
     if not numero:
         return None
