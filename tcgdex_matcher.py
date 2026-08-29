@@ -1,6 +1,7 @@
 """Correspondance stricte numéro/édition/variante avec TCGdex en français."""
 
 import re
+import time
 import unicodedata
 
 import requests
@@ -32,12 +33,25 @@ def variantes_numero(numero, total_officiel):
     return list(dict.fromkeys(variantes))
 
 
-def obtenir_json(session, url, params=None, timeout=15):
-    reponse = session.get(url, params=params, timeout=timeout)
-    if reponse.status_code == 404:
-        return None
-    reponse.raise_for_status()
-    return reponse.json()
+def obtenir_json(session, url, params=None, timeout=15, tentatives=3):
+    """Réessaie brièvement une panne réseau TCGdex, jamais un refus d'accès."""
+    for tentative in range(tentatives):
+        try:
+            reponse = session.get(url, params=params, timeout=timeout)
+        except (requests.ConnectionError, requests.Timeout):
+            if tentative + 1 >= tentatives:
+                raise
+            time.sleep(2**tentative)
+            continue
+
+        if reponse.status_code == 404:
+            return None
+        if reponse.status_code in {502, 503, 504} and tentative + 1 < tentatives:
+            time.sleep(2**tentative)
+            continue
+        reponse.raise_for_status()
+        return reponse.json()
+    return None
 
 
 def nom_present(titre, nom_carte):
