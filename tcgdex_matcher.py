@@ -1,10 +1,12 @@
 """Correspondance stricte numéro/édition/variante avec TCGdex en français."""
 
 import re
+import socket
 import time
 import unicodedata
 
 import requests
+from urllib3.util import connection as urllib3_connection
 
 
 API_BASE = "https://api.tcgdex.net/v2"
@@ -34,10 +36,20 @@ def variantes_numero(numero, total_officiel):
 
 
 def obtenir_json(session, url, params=None, timeout=15, tentatives=3):
-    """Réessaie brièvement une panne réseau TCGdex, jamais un refus d'accès."""
+    """Utilise IPv4 et réessaie une panne réseau, jamais un refus d'accès.
+
+    Certains runners GitHub Actions résolvent d'abord l'adresse IPv6 de TCGdex
+    alors qu'ils n'ont pas de route IPv6. Le choix IPv4 est limité à la durée de
+    chaque requête afin de ne pas modifier les autres accès réseau du bot.
+    """
     for tentative in range(tentatives):
         try:
-            reponse = session.get(url, params=params, timeout=timeout)
+            famille_precedente = urllib3_connection.allowed_gai_family
+            urllib3_connection.allowed_gai_family = lambda: socket.AF_INET
+            try:
+                reponse = session.get(url, params=params, timeout=timeout)
+            finally:
+                urllib3_connection.allowed_gai_family = famille_precedente
         except (requests.ConnectionError, requests.Timeout):
             if tentative + 1 >= tentatives:
                 raise
