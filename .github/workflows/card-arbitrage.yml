@@ -22,10 +22,10 @@ jobs:
 
     steps:
       - name: Récupérer le code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Installer Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.12"
           cache: pip
@@ -38,14 +38,14 @@ jobs:
 
       - name: Restaurer le guide Cardmarket
         id: restore-guide
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: runtime-data/cardmarket_price_guide_6.json
           key: cardmarket-guide-v1-${{ steps.guide-slot.outputs.slot }}
           restore-keys: cardmarket-guide-v1-
 
       - name: Restaurer les annonces déjà vues
-        uses: actions/cache/restore@v4
+        uses: actions/cache/restore@v5
         with:
           path: runtime-data/.vinted_arbitrage_seen.json
           key: vinted-state-${{ github.run_id }}
@@ -59,14 +59,14 @@ jobs:
 
       - name: Sauvegarder le guide Cardmarket
         if: ${{ always() && steps.restore-guide.outputs.cache-hit != 'true' && hashFiles('runtime-data/cardmarket_price_guide_6.json') != '' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: runtime-data/cardmarket_price_guide_6.json
           key: cardmarket-guide-v1-${{ steps.guide-slot.outputs.slot }}
 
       - name: Sauvegarder les annonces déjà vues
         if: ${{ always() && hashFiles('runtime-data/.vinted_arbitrage_seen.json') != '' }}
-        uses: actions/cache/save@v4
+        uses: actions/cache/save@v5
         with:
           path: runtime-data/.vinted_arbitrage_seen.json
           key: vinted-state-${{ github.run_id }}
