@@ -1,0 +1,72 @@
+name: Alertes cartes Vinted Cardmarket
+
+on:
+  schedule:
+    - cron: "2/5 * * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: card-arbitrage
+  cancel-in-progress: false
+
+jobs:
+  analyse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    env:
+      POKESTOCK_DATA_DIR: ${{ github.workspace }}/runtime-data
+      DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+
+    steps:
+      - name: Récupérer le code
+        uses: actions/checkout@v4
+
+      - name: Installer Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-arbitrage.txt
+
+      - name: Calculer la période du guide Cardmarket
+        id: guide-slot
+        shell: bash
+        run: echo "slot=$(date -u +%Y-%m-%d)-$((10#$(date -u +%H) / 12))" >> "$GITHUB_OUTPUT"
+
+      - name: Restaurer le guide Cardmarket
+        id: restore-guide
+        uses: actions/cache/restore@v4
+        with:
+          path: runtime-data/cardmarket_price_guide_6.json
+          key: cardmarket-guide-v1-${{ steps.guide-slot.outputs.slot }}
+          restore-keys: cardmarket-guide-v1-
+
+      - name: Restaurer les annonces déjà vues
+        uses: actions/cache/restore@v4
+        with:
+          path: runtime-data/.vinted_arbitrage_seen.json
+          key: vinted-state-${{ github.run_id }}
+          restore-keys: vinted-state-
+
+      - name: Installer les dépendances
+        run: python -m pip install --requirement requirements-arbitrage.txt
+
+      - name: Analyser les nouvelles annonces
+        run: python card_arbitrage.py --limit 50 --discord --remember
+
+      - name: Sauvegarder le guide Cardmarket
+        if: ${{ always() && steps.restore-guide.outputs.cache-hit != 'true' && hashFiles('runtime-data/cardmarket_price_guide_6.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: runtime-data/cardmarket_price_guide_6.json
+          key: cardmarket-guide-v1-${{ steps.guide-slot.outputs.slot }}
+
+      - name: Sauvegarder les annonces déjà vues
+        if: ${{ always() && hashFiles('runtime-data/.vinted_arbitrage_seen.json') != '' }}
+        uses: actions/cache/save@v4
+        with:
+          path: runtime-data/.vinted_arbitrage_seen.json
+          key: vinted-state-${{ github.run_id }}
