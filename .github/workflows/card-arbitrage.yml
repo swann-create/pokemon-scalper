@@ -20,6 +20,9 @@ jobs:
       POKESTOCK_DATA_DIR: ${{ github.workspace }}/runtime-data
       TCGDEX_INDEX_FILE: ${{ github.workspace }}/runtime-data/tcgdex_fr_index.json
       DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
+      EBAY_CLIENT_ID: ${{ secrets.EBAY_CLIENT_ID }}
+      EBAY_CLIENT_SECRET: ${{ secrets.EBAY_CLIENT_SECRET }}
+      EBAY_DELIVERY_POSTAL_CODE: "75001"
 
     steps:
       - name: Récupérer le code
