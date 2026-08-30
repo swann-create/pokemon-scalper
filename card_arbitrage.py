@@ -351,6 +351,7 @@ def analyser_annonces(
     marge_minimum,
     roi_minimum,
     decote_minimum=10.0,
+    limite_ocr_approfondi=20,
     utiliser_ocr=True,
     verifier_vendeurs=True,
     note_vendeur_minimum=4.8,
@@ -391,7 +392,12 @@ def analyser_annonces(
                 correspondance["carte_anglaise"],
             )
 
-        if utiliser_ocr and (not correspondance or langue != "francais_confirme"):
+        peut_approfondir = statistiques["ocr_approfondi"] < limite_ocr_approfondi
+        if (
+            utiliser_ocr
+            and peut_approfondir
+            and (not correspondance or langue != "francais_confirme")
+        ):
             texte_ameliore = texte_ocr_image(image_url, ameliorer=True)
             statistiques["ocr_approfondi"] += 1
             texte_ocr = "\n".join(
@@ -505,6 +511,12 @@ def construire_parser():
         help="écart minimal sous le marché prudent pour une alerte Bon prix",
     )
     parser.add_argument(
+        "--deep-ocr-limit",
+        type=int,
+        default=20,
+        help="nombre maximal de photos récentes retraitées par passage",
+    )
+    parser.add_argument(
         "--min-seller-rating",
         type=float,
         default=4.8,
@@ -597,6 +609,7 @@ def executer_cycle(args, webhook=""):
         marge_minimum=max(0, args.min_margin),
         roi_minimum=max(0, args.min_roi),
         decote_minimum=max(0, args.min_discount),
+        limite_ocr_approfondi=max(0, args.deep_ocr_limit),
         utiliser_ocr=not args.no_ocr,
         note_vendeur_minimum=min(5.0, max(0.0, args.min_seller_rating)),
         evaluations_vendeur_minimum=max(0, args.min_seller_reviews),

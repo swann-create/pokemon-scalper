@@ -206,6 +206,8 @@ Avec `--daily-status`, Discord reçoit au maximum un rapport par jour indiquant
 les sources actives, le nombre d'annonces observées, les opportunités fortes et
 les bons prix. Les photos difficiles bénéficient automatiquement d'un second
 OCR avec contraste renforcé et rotations.
+Pour préserver la rapidité, ce traitement lourd est réservé aux 20 photos les
+plus récentes de chaque passage (`--deep-ocr-limit`).
 
 Tesseract est utilisé en solution de secours lorsqu'il est déjà installé. Sans
 RapidOCR ni Tesseract, le programme continue son diagnostic mais refuse toutes
