@@ -185,6 +185,16 @@ Le planning GitHub ne garantit pas une exécution exactement à la minute prévu
 et peut être retardé. Aucun secret ne doit être placé dans `.env.example`, le
 workflow ou un autre fichier envoyé sur le dépôt public.
 
+### Ajouter eBay France
+
+La source eBay utilise uniquement l'API Browse officielle. Après création des
+clés Production dans le programme développeur eBay, ajouter deux secrets dans
+**Settings > Secrets and variables > Actions** : `EBAY_CLIENT_ID` (App ID) et
+`EBAY_CLIENT_SECRET` (Cert ID). Sans ces secrets, Vinted continue de fonctionner
+normalement et eBay reste désactivé. La recherche eBay garde seulement les
+offres à prix fixe en euros avec livraison chiffrée, puis applique les mêmes
+contrôles de langue française, carte exacte, marge et réputation vendeur.
+
 Tesseract est utilisé en solution de secours lorsqu'il est déjà installé. Sans
 RapidOCR ni Tesseract, le programme continue son diagnostic mais refuse toutes
 les annonces dont la langue ne peut pas être vérifiée.

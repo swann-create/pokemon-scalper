@@ -278,7 +278,7 @@ def fusionner_catalogues_recents(catalogues):
             if identifiant in ids_vus:
                 continue
             annonce = dict(annonce)
-            annonce["requete_source"] = requete
+            annonce.setdefault("requete_source", requete)
             resultat.append(annonce)
             ids_vus.add(identifiant)
     return resultat
@@ -302,14 +302,18 @@ def charger_ids_vus(chemin):
         donnees = json.loads(chemin.read_text(encoding="utf-8"))
     except (FileNotFoundError, json.JSONDecodeError, OSError):
         return set()
-    return {str(identifiant) for identifiant in donnees if str(identifiant).isdigit()}
+    return {
+        str(identifiant)
+        for identifiant in donnees
+        if isinstance(identifiant, (str, int)) and str(identifiant).strip()
+    }
 
 
 def memoriser_ids(chemin, ids):
     chemin.parent.mkdir(parents=True, exist_ok=True)
     temporaire = chemin.with_suffix(chemin.suffix + ".tmp")
     temporaire.write_text(
-        json.dumps(sorted(ids, key=int), indent=2) + "\n",
+        json.dumps(sorted({str(identifiant) for identifiant in ids}), indent=2) + "\n",
         encoding="utf-8",
     )
     os.replace(temporaire, chemin)

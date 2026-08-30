@@ -19,11 +19,13 @@ from cardmarket_data import (
     indexer_guide,
     prix_reference_conservateur,
 )
+from source_ebay import EbayIndisponible, identifiants_ebay, telecharger_catalogues_ebay
 from tcgdex_matcher import chercher_carte, langue_depuis_ocr, normaliser
 from vinted_probe import (
     RECHERCHES_CARTES,
     VintedIndisponible,
     charger_ids_vus,
+    fusionner_catalogues_recents,
     memoriser_ids,
     telecharger_catalogues,
     telecharger_vendeur_public,
@@ -40,10 +42,15 @@ _RAPIDOCR_INDISPONIBLE = False
 
 
 COEFFICIENTS_ETAT = {
+    "neuf": 0.90,
     "neuf avec etiquette": 0.90,
     "neuf sans etiquette": 0.90,
+    "near mint": 0.90,
+    "nm": 0.90,
+    "excellent": 0.80,
     "tres bon etat": 0.90,
     "bon etat": 0.80,
+    "occasion": 0.60,
     "satisfaisant": 0.65,
 }
 
@@ -134,7 +141,10 @@ def calculer_rentabilite(
     emballage=0.30,
 ):
     prix_etat = prix_marche * coefficient_etat(annonce.get("etat_vinted"))
-    cout_achat = annonce["prix_avec_protection"] + livraison_vinted
+    livraison = annonce.get("livraison_estimee")
+    if livraison is None:
+        livraison = livraison_vinted
+    cout_achat = annonce["prix_avec_protection"] + max(0.0, livraison)
     revenu_net = prix_etat * (1 - commission_cardmarket - reserve_risque) - emballage
     marge = revenu_net - cout_achat
     roi = (marge / cout_achat * 100) if cout_achat > 0 else 0
@@ -153,11 +163,12 @@ def construire_payload_discord(opportunite):
     calcul = opportunite["calcul"]
     carte = opportunite["correspondance"]["carte"]
     vendeur = opportunite["vendeur"]
+    source = annonce.get("source", "Vinted")
     return {
         "allowed_mentions": {"parse": []},
         "embeds": [
             {
-                "title": "💸 Opportunité carte Pokémon",
+                "title": f"💸 Opportunité Pokémon — {source}",
                 "description": annonce["titre"],
                 "url": annonce["url"],
                 "color": 0x2ECC71,
@@ -165,11 +176,11 @@ def construire_payload_discord(opportunite):
                     {"name": "Édition", "value": carte["set"]["name"], "inline": True},
                     {"name": "Numéro", "value": carte["localId"], "inline": True},
                     {"name": "Langue", "value": "Français vérifié", "inline": True},
-                    {"name": "Coût Vinted", "value": f"{calcul['cout_achat']:.2f} €", "inline": True},
+                    {"name": f"Coût {source}", "value": f"{calcul['cout_achat']:.2f} €", "inline": True},
                     {"name": "Revente prudente", "value": f"{calcul['prix_revente_prudent']:.2f} €", "inline": True},
                     {"name": "Marge / ROI", "value": f"{calcul['marge']:.2f} € / {calcul['roi']:.1f} %", "inline": True},
                     {
-                        "name": "Vendeur Vinted",
+                        "name": f"Vendeur {source}",
                         "value": (
                             f"{vendeur['nom']} — {vendeur['note']:.1f}/5 "
                             f"({vendeur['evaluations']} évaluations)"
@@ -183,7 +194,7 @@ def construire_payload_discord(opportunite):
                 "footer": {
                     "text": (
                         "La note réduit le risque sans garantir l'authenticité. "
-                        "Achète uniquement via Vinted."
+                        f"Achète uniquement via {source}."
                     )
                 },
             }
@@ -192,7 +203,7 @@ def construire_payload_discord(opportunite):
             {
                 "type": 1,
                 "components": [
-                    {"type": 2, "style": 5, "label": "Voir l'annonce", "url": annonce["url"]},
+                    {"type": 2, "style": 5, "label": f"Voir sur {source}", "url": annonce["url"]},
                     {"type": 2, "style": 5, "label": "Voir le vendeur", "url": vendeur["profil_url"]},
                 ],
             }
@@ -272,9 +283,10 @@ def analyser_annonces(
             statistiques["marge_insuffisante"] += 1
             continue
 
-        vendeur = None
+        vendeur = annonce.get("vendeur")
         if verifier_vendeurs:
-            vendeur = chargeur_vendeur(annonce)
+            if vendeur is None and annonce.get("source", "Vinted") == "Vinted":
+                vendeur = chargeur_vendeur(annonce)
             if not vendeur_est_fiable(
                 vendeur,
                 note_minimum=note_vendeur_minimum,
@@ -374,10 +386,30 @@ def executer_cycle(args, webhook=""):
     guide = charger_guide(GUIDE_FILE)
     guide_index = indexer_guide(guide)
     recherches = args.queries or list(RECHERCHES_CARTES)
-    annonces = telecharger_catalogues(
+    annonces_vinted = telecharger_catalogues(
         recherches,
         limite=max(1, min(96, args.limit)),
     )
+    flux = [("Vinted", annonces_vinted)]
+    sources_actives = ["Vinted"]
+    erreurs_sources = []
+
+    client_id_ebay, client_secret_ebay = identifiants_ebay()
+    if client_id_ebay and client_secret_ebay:
+        try:
+            annonces_ebay = telecharger_catalogues_ebay(
+                recherches,
+                limite=max(1, min(96, args.limit)),
+            )
+            flux.append(("eBay", annonces_ebay))
+            sources_actives.append("eBay")
+        except (requests.RequestException, EbayIndisponible) as erreur:
+            erreurs_sources.append(f"eBay : {erreur}")
+            print(f"⚠️ Source eBay ignorée pour ce passage : {erreur}", file=sys.stderr)
+    else:
+        erreurs_sources.append("eBay : clés API absentes")
+
+    annonces = fusionner_catalogues_recents(flux)
 
     ids_vus = charger_ids_vus(ARBITRAGE_STATE_FILE)
     nouvelles = [annonce for annonce in annonces if annonce["id"] not in ids_vus]
@@ -401,6 +433,8 @@ def executer_cycle(args, webhook=""):
     resultat = {
         "guide_cardmarket_age_heures": round(age_guide, 1) if age_guide is not None else None,
         "recherches": recherches,
+        "sources_actives": sources_actives,
+        "erreurs_sources": erreurs_sources,
         "annonces_catalogue_uniques": len(annonces),
         "statistiques": statistiques,
         "opportunites": opportunites,
@@ -408,6 +442,7 @@ def executer_cycle(args, webhook=""):
     if args.json:
         print(json.dumps(resultat, indent=2, ensure_ascii=False))
     else:
+        print(f"🛒 Sources actives : {', '.join(sources_actives)}")
         print(f"🌐 {len(recherches)} recherche(s) surveillée(s)")
         print(f"🆕 {len(annonces)} annonce(s) récente(s) unique(s) trouvée(s)")
         print(f"🔎 {statistiques['annonces']} nouvelle(s) analysée(s)")
