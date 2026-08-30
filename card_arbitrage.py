@@ -1,6 +1,7 @@
 """Analyse automatique Vinted -> TCGdex -> Cardmarket, sans achat automatique."""
 
 import argparse
+from datetime import datetime
 import importlib.util
 import json
 import os
@@ -10,6 +11,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from zoneinfo import ZoneInfo
 
 import requests
 
@@ -37,6 +39,7 @@ BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("POKESTOCK_DATA_DIR", str(BASE_DIR))).expanduser()
 GUIDE_FILE = DATA_DIR / "cardmarket_price_guide_6.json"
 ARBITRAGE_STATE_FILE = DATA_DIR / ".vinted_arbitrage_seen.json"
+DAILY_STATUS_FILE = DATA_DIR / ".discord_daily_status.json"
 _MOTEUR_RAPIDOCR = None
 _RAPIDOCR_INDISPONIBLE = False
 
@@ -96,7 +99,40 @@ def texte_rapidocr(chemin):
     return None
 
 
-def texte_ocr_image(url, timeout=20):
+def creer_variantes_ocr(chemin, dossier):
+    """Crée des variantes contrastées et tournées pour les photos difficiles."""
+    try:
+        from PIL import Image, ImageEnhance, ImageOps
+    except ImportError:
+        return []
+
+    try:
+        with Image.open(chemin) as source:
+            image = ImageOps.exif_transpose(source).convert("L")
+            image = ImageOps.autocontrast(image, cutoff=1)
+            image = ImageEnhance.Contrast(image).enhance(1.7)
+            largeur, hauteur = image.size
+            cote_maximal = max(largeur, hauteur)
+            if cote_maximal < 1800:
+                facteur = min(3.0, 1800 / max(1, cote_maximal))
+                image = image.resize(
+                    (int(largeur * facteur), int(hauteur * facteur))
+                )
+            elif cote_maximal > 3200:
+                image.thumbnail((3200, 3200))
+
+            chemins = []
+            for index, angle in enumerate((0, 90, 270)):
+                variante = image if angle == 0 else image.rotate(angle, expand=True)
+                destination = Path(dossier) / f"variante-{index}.png"
+                variante.save(destination, format="PNG", optimize=True)
+                chemins.append(destination)
+            return chemins
+    except (OSError, ValueError):
+        return []
+
+
+def texte_ocr_image(url, timeout=20, ameliorer=False):
     if not url:
         return None
 
@@ -107,28 +143,34 @@ def texte_ocr_image(url, timeout=20):
         reponse.raise_for_status()
         chemin.write_bytes(reponse.content)
 
-        texte = texte_rapidocr(chemin)
-        if texte:
-            return texte
+        chemins = creer_variantes_ocr(chemin, dossier) if ameliorer else [chemin]
+        textes = []
+        for chemin_ocr in chemins:
+            texte = texte_rapidocr(chemin_ocr)
+            if texte and texte not in textes:
+                textes.append(texte)
+        if textes:
+            return "\n".join(textes)
 
         executable = shutil.which("tesseract")
         if not executable:
             return None
 
-        commandes = (
-            [executable, str(chemin), "stdout", "-l", "fra+eng", "--psm", "6"],
-            [executable, str(chemin), "stdout", "-l", "eng", "--psm", "6"],
-        )
-        for commande in commandes:
-            resultat = subprocess.run(
-                commande,
-                capture_output=True,
-                text=True,
-                timeout=30,
-                check=False,
+        for chemin_ocr in chemins:
+            commandes = (
+                [executable, str(chemin_ocr), "stdout", "-l", "fra+eng", "--psm", "6"],
+                [executable, str(chemin_ocr), "stdout", "-l", "eng", "--psm", "6"],
             )
-            if resultat.returncode == 0 and resultat.stdout.strip():
-                return resultat.stdout
+            for commande in commandes:
+                resultat = subprocess.run(
+                    commande,
+                    capture_output=True,
+                    text=True,
+                    timeout=30,
+                    check=False,
+                )
+                if resultat.returncode == 0 and resultat.stdout.strip():
+                    return resultat.stdout
     return None
 
 
@@ -148,6 +190,9 @@ def calculer_rentabilite(
     revenu_net = prix_etat * (1 - commission_cardmarket - reserve_risque) - emballage
     marge = revenu_net - cout_achat
     roi = (marge / cout_achat * 100) if cout_achat > 0 else 0
+    decote_marche = (
+        (prix_etat - cout_achat) / prix_etat * 100 if prix_etat > 0 else 0
+    )
     return {
         "prix_marche": round(prix_marche, 2),
         "prix_revente_prudent": round(prix_etat, 2),
@@ -155,6 +200,7 @@ def calculer_rentabilite(
         "revenu_net": round(revenu_net, 2),
         "marge": round(marge, 2),
         "roi": round(roi, 1),
+        "decote_marche": round(decote_marche, 1),
     }
 
 
@@ -164,14 +210,19 @@ def construire_payload_discord(opportunite):
     carte = opportunite["correspondance"]["carte"]
     vendeur = opportunite["vendeur"]
     source = annonce.get("source", "Vinted")
+    est_bon_prix = opportunite.get("type_alerte") == "bon_prix"
     return {
         "allowed_mentions": {"parse": []},
         "embeds": [
             {
-                "title": f"💸 Opportunité Pokémon — {source}",
+                "title": (
+                    f"💙 Bon prix Pokémon — {source}"
+                    if est_bon_prix
+                    else f"💸 Opportunité Pokémon — {source}"
+                ),
                 "description": annonce["titre"],
                 "url": annonce["url"],
-                "color": 0x2ECC71,
+                "color": 0x3498DB if est_bon_prix else 0x2ECC71,
                 "fields": [
                     {"name": "Édition", "value": carte["set"]["name"], "inline": True},
                     {"name": "Numéro", "value": carte["localId"], "inline": True},
@@ -179,6 +230,11 @@ def construire_payload_discord(opportunite):
                     {"name": f"Coût {source}", "value": f"{calcul['cout_achat']:.2f} €", "inline": True},
                     {"name": "Revente prudente", "value": f"{calcul['prix_revente_prudent']:.2f} €", "inline": True},
                     {"name": "Marge / ROI", "value": f"{calcul['marge']:.2f} € / {calcul['roi']:.1f} %", "inline": True},
+                    {
+                        "name": "Sous le marché",
+                        "value": f"{calcul['decote_marche']:.1f} %",
+                        "inline": True,
+                    },
                     {
                         "name": f"Vendeur {source}",
                         "value": (
@@ -219,12 +275,82 @@ def envoyer_discord(webhook, opportunite, timeout=15):
     reponse.raise_for_status()
 
 
+def envoyer_statut_quotidien(
+    webhook,
+    resultat,
+    chemin=DAILY_STATUS_FILE,
+    maintenant=None,
+    poster=requests.post,
+    timeout=15,
+):
+    """Envoie au maximum un rapport de santé par jour, heure de Paris."""
+    maintenant = maintenant or datetime.now(ZoneInfo("Europe/Paris"))
+    date_locale = maintenant.strftime("%Y-%m-%d")
+    try:
+        dernier = json.loads(chemin.read_text(encoding="utf-8")).get("date")
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        dernier = None
+    if dernier == date_locale:
+        return False
+
+    statistiques = resultat["statistiques"]
+    payload = {
+        "allowed_mentions": {"parse": []},
+        "embeds": [
+            {
+                "title": "🟢 Bot Pokémon opérationnel",
+                "color": 0x2ECC71,
+                "fields": [
+                    {
+                        "name": "Sources",
+                        "value": ", ".join(resultat["sources_actives"]),
+                        "inline": True,
+                    },
+                    {
+                        "name": "Annonces récentes",
+                        "value": str(resultat["annonces_catalogue_uniques"]),
+                        "inline": True,
+                    },
+                    {
+                        "name": "Nouvelles analysées",
+                        "value": str(statistiques["annonces"]),
+                        "inline": True,
+                    },
+                    {
+                        "name": "Alertes fortes",
+                        "value": str(statistiques["opportunites"]),
+                        "inline": True,
+                    },
+                    {
+                        "name": "Bons prix",
+                        "value": str(statistiques["bons_prix"]),
+                        "inline": True,
+                    },
+                ],
+                "footer": {"text": f"Rapport quotidien du {date_locale}"},
+            }
+        ],
+    }
+    reponse = poster(webhook, json=payload, timeout=timeout)
+    reponse.raise_for_status()
+
+    chemin.parent.mkdir(parents=True, exist_ok=True)
+    temporaire = chemin.with_suffix(chemin.suffix + ".tmp")
+    temporaire.write_text(
+        json.dumps({"date": date_locale}, indent=2) + "\n",
+        encoding="utf-8",
+    )
+    os.replace(temporaire, chemin)
+    return True
+
+
 def analyser_annonces(
     annonces,
     guide_index,
     livraison_vinted,
     marge_minimum,
     roi_minimum,
+    decote_minimum=10.0,
     utiliser_ocr=True,
     verifier_vendeurs=True,
     note_vendeur_minimum=4.8,
@@ -240,29 +366,58 @@ def analyser_annonces(
         "sans_prix": 0,
         "marge_insuffisante": 0,
         "vendeur_non_fiable": 0,
+        "ocr_approfondi": 0,
         "opportunites": 0,
+        "bons_prix": 0,
+        "alertes": 0,
     }
 
     for annonce in annonces:
         correspondance = chercher_carte(annonce["titre"])
         texte_ocr = None
+        langue = None
+        image_url = annonce.get("image_hd") or annonce.get("image")
         if utiliser_ocr:
-            texte_ocr = texte_ocr_image(
-                annonce.get("image_hd") or annonce.get("image")
-            )
+            texte_ocr = texte_ocr_image(image_url)
             if not correspondance and texte_ocr:
                 correspondance = chercher_carte(
                     f"{annonce['titre']}\n{texte_ocr}"
                 )
+
+        if correspondance:
+            langue = langue_depuis_ocr(
+                texte_ocr,
+                correspondance["carte"],
+                correspondance["carte_anglaise"],
+            )
+
+        if utiliser_ocr and (not correspondance or langue != "francais_confirme"):
+            texte_ameliore = texte_ocr_image(image_url, ameliorer=True)
+            statistiques["ocr_approfondi"] += 1
+            texte_ocr = "\n".join(
+                texte for texte in (texte_ocr, texte_ameliore) if texte
+            ) or None
+            if texte_ocr:
+                correspondance_amelioree = chercher_carte(
+                    f"{annonce['titre']}\n{texte_ocr}"
+                )
+                if correspondance_amelioree:
+                    correspondance = correspondance_amelioree
+                    langue = langue_depuis_ocr(
+                        texte_ocr,
+                        correspondance["carte"],
+                        correspondance["carte_anglaise"],
+                    )
         if not correspondance:
             statistiques["sans_correspondance"] += 1
             continue
 
-        langue = langue_depuis_ocr(
-            texte_ocr,
-            correspondance["carte"],
-            correspondance["carte_anglaise"],
-        )
+        if langue is None:
+            langue = langue_depuis_ocr(
+                texte_ocr,
+                correspondance["carte"],
+                correspondance["carte_anglaise"],
+            )
         if langue != "francais_confirme":
             statistiques["langue_non_confirmee"] += 1
             continue
@@ -279,7 +434,13 @@ def analyser_annonces(
             prix_marche,
             livraison_vinted=livraison_vinted,
         )
-        if calcul["marge"] < marge_minimum or calcul["roi"] < roi_minimum:
+        est_opportunite = (
+            calcul["marge"] >= marge_minimum and calcul["roi"] >= roi_minimum
+        )
+        est_bon_prix = (
+            not est_opportunite and calcul["decote_marche"] >= decote_minimum
+        )
+        if not est_opportunite and not est_bon_prix:
             statistiques["marge_insuffisante"] += 1
             continue
 
@@ -301,14 +462,19 @@ def analyser_annonces(
             "langue": langue,
             "calcul": calcul,
             "vendeur": vendeur,
+            "type_alerte": "opportunite" if est_opportunite else "bon_prix",
         }
         opportunites.append(opportunite)
+        if est_opportunite:
+            statistiques["opportunites"] += 1
+        else:
+            statistiques["bons_prix"] += 1
         if notifier_opportunite:
             # L'alerte part dès que l'annonce récente est validée, sans attendre
             # la fin de toutes les reconnaissances OCR du passage.
             notifier_opportunite(opportunite)
 
-    statistiques["opportunites"] = len(opportunites)
+    statistiques["alertes"] = len(opportunites)
     return opportunites, statistiques
 
 
@@ -333,6 +499,12 @@ def construire_parser():
     parser.add_argument("--min-margin", type=float, default=8.0)
     parser.add_argument("--min-roi", type=float, default=30.0)
     parser.add_argument(
+        "--min-discount",
+        type=float,
+        default=10.0,
+        help="écart minimal sous le marché prudent pour une alerte Bon prix",
+    )
+    parser.add_argument(
         "--min-seller-rating",
         type=float,
         default=4.8,
@@ -345,6 +517,11 @@ def construire_parser():
         help="nombre minimal d'évaluations vendeur (défaut : 10)",
     )
     parser.add_argument("--discord", action="store_true")
+    parser.add_argument(
+        "--daily-status",
+        action="store_true",
+        help="envoie au plus un rapport Discord par jour",
+    )
     parser.add_argument("--remember", action="store_true")
     parser.add_argument(
         "--interval",
@@ -419,6 +596,7 @@ def executer_cycle(args, webhook=""):
         livraison_vinted=max(0, args.shipping),
         marge_minimum=max(0, args.min_margin),
         roi_minimum=max(0, args.min_roi),
+        decote_minimum=max(0, args.min_discount),
         utiliser_ocr=not args.no_ocr,
         note_vendeur_minimum=min(5.0, max(0.0, args.min_seller_rating)),
         evaluations_vendeur_minimum=max(0, args.min_seller_reviews),
@@ -448,19 +626,26 @@ def executer_cycle(args, webhook=""):
         print(f"🔎 {statistiques['annonces']} nouvelle(s) analysée(s)")
         print(f"🔗 {statistiques['sans_correspondance']} sans correspondance exacte")
         print(f"🇫🇷 {statistiques['langue_non_confirmee']} langue non confirmée")
+        print(f"🖼️ {statistiques['ocr_approfondi']} analyse(s) d'image approfondie(s)")
         print(f"💶 {statistiques['marge_insuffisante']} marge insuffisante")
         print(f"🛡️ {statistiques['vendeur_non_fiable']} vendeur(s) écarté(s)")
         print(f"✅ {statistiques['opportunites']} opportunité(s)")
+        print(f"💙 {statistiques['bons_prix']} bon(s) prix")
         for opportunite in opportunites:
             calcul = opportunite["calcul"]
             print(f"\n{opportunite['annonce']['titre']}")
+            print(f"  Alerte : {opportunite['type_alerte']}")
             print(f"  Marge : {calcul['marge']:.2f} € — ROI : {calcul['roi']:.1f} %")
+            print(f"  Sous le marché prudent : {calcul['decote_marche']:.1f} %")
             vendeur = opportunite["vendeur"]
             print(
                 f"  Vendeur : {vendeur['nom']} — {vendeur['note']:.1f}/5 "
                 f"({vendeur['evaluations']} évaluations)"
             )
             print(f"  {opportunite['annonce']['url']}")
+
+    if args.discord and args.daily_status:
+        envoyer_statut_quotidien(webhook, resultat)
 
     if args.remember:
         memoriser_ids(

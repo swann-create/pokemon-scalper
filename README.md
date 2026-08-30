@@ -195,6 +195,18 @@ normalement et eBay reste désactivé. La recherche eBay garde seulement les
 offres à prix fixe en euros avec livraison chiffrée, puis applique les mêmes
 contrôles de langue française, carte exacte, marge et réputation vendeur.
 
+### Alertes Bon prix et rapport quotidien
+
+Une annonce exacte, française et issue d'un vendeur fiable déclenche une alerte
+bleue **Bon prix** lorsque son coût total est au moins 10 % sous le prix
+Cardmarket prudent, même si la marge de revente n'atteint pas encore 8 € et
+30 % de ROI. Le seuil peut être changé avec `--min-discount`.
+
+Avec `--daily-status`, Discord reçoit au maximum un rapport par jour indiquant
+les sources actives, le nombre d'annonces observées, les opportunités fortes et
+les bons prix. Les photos difficiles bénéficient automatiquement d'un second
+OCR avec contraste renforcé et rotations.
+
 Tesseract est utilisé en solution de secours lorsqu'il est déjà installé. Sans
 RapidOCR ni Tesseract, le programme continue son diagnostic mais refuse toutes
 les annonces dont la langue ne peut pas être vérifiée.
