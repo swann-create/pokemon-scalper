@@ -30,6 +30,15 @@ STATUTS_BLOQUANTS = {401, 403, 429}
 
 MARQUEUR_ID = re.compile(r"^product-item-id-(\d+)--overlay-link$")
 IMAGE_HD = re.compile(r'\\"photos\\":\[\{\\"url\\":\\"(.+?)\\"')
+VENDEUR_PUBLIC = re.compile(
+    r'\\"name\\":\\"user_info_header\\".*?'
+    r'\\"data\\":\{.*?'
+    r'\\"seller_id\\":(?P<seller_id>\d+).*?'
+    r'\\"name\\":\\"(?P<nom>(?:\\.|[^"\\])*)\\".*?'
+    r'\\"feedback_count\\":(?P<evaluations>\d+).*?'
+    r'\\"feedback_reputation\\":(?P<reputation>null|\d+(?:\.\d+)?)',
+    re.DOTALL,
+)
 MONTANT_EURO = re.compile(r"(\d+(?:[.,]\d{1,2})?)\s*€")
 ETAT = re.compile(r"(?:^|,\s*)État:\s*(.+?)(?=,\s*\d+(?:[.,]\d+)?\s*€)")
 MARQUE = re.compile(r"(?:^|,\s*)Marque:\s*(.+?)(?=,\s*État:)")
@@ -95,6 +104,62 @@ def extraire_image_hd(html, identifiant):
         .replace(r"\u0026", "&")
         .replace(r"\u002F", "/")
     )
+
+
+def extraire_vendeur_public(html):
+    """Extrait uniquement la réputation publique affichée sur la fiche."""
+    marqueur = r'\"name\":\"user_info_header\"'
+    debut = html.find(marqueur)
+    if debut < 0:
+        return None
+
+    # Les données utiles sont au début du composant. La fenêtre bornée évite
+    # qu'une modification de page fasse correspondre un autre objet JSON.
+    correspondance = VENDEUR_PUBLIC.search(html[debut : debut + 20_000])
+    if not correspondance:
+        return None
+
+    reputation = correspondance.group("reputation")
+    try:
+        nom = json.loads(f'"{correspondance.group("nom")}"')
+    except json.JSONDecodeError:
+        nom = correspondance.group("nom").replace(r'\"', '"')
+
+    seller_id = correspondance.group("seller_id")
+    return {
+        "id": seller_id,
+        "nom": nom,
+        "evaluations": int(correspondance.group("evaluations")),
+        "note": round(float(reputation) * 5, 2)
+        if reputation != "null"
+        else None,
+        "profil_url": urljoin(BASE_URL, f"/member/{seller_id}"),
+    }
+
+
+def vendeur_est_fiable(vendeur, note_minimum=4.8, evaluations_minimum=10):
+    """Applique un seuil prudent, sans présenter la note comme une garantie."""
+    if not vendeur or vendeur.get("note") is None:
+        return False
+    return (
+        vendeur["note"] >= note_minimum
+        and vendeur.get("evaluations", 0) >= evaluations_minimum
+    )
+
+
+def telecharger_vendeur_public(annonce, timeout=20):
+    """Lit la réputation publique depuis la fiche d'une annonce rentable."""
+    reponse = requests.get(annonce["url"], headers=HEADERS, timeout=timeout)
+    if reponse.status_code in STATUTS_BLOQUANTS:
+        raise VintedIndisponible(
+            f"Vinted a refusé la fiche vendeur (HTTP {reponse.status_code})."
+        )
+    reponse.raise_for_status()
+
+    texte_minuscule = reponse.text.lower()
+    if "captcha" in texte_minuscule and "user_info_header" not in reponse.text:
+        raise VintedIndisponible("Vinted demande un CAPTCHA ; arrêt sans contournement.")
+    return extraire_vendeur_public(reponse.text)
 
 
 def analyser_catalogue(html, limite=20):

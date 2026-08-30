@@ -25,6 +25,8 @@ from vinted_probe import (
     charger_ids_vus,
     memoriser_ids,
     telecharger_catalogue,
+    telecharger_vendeur_public,
+    vendeur_est_fiable,
 )
 
 
@@ -149,6 +151,7 @@ def construire_payload_discord(opportunite):
     annonce = opportunite["annonce"]
     calcul = opportunite["calcul"]
     carte = opportunite["correspondance"]["carte"]
+    vendeur = opportunite["vendeur"]
     return {
         "allowed_mentions": {"parse": []},
         "embeds": [
@@ -164,18 +167,32 @@ def construire_payload_discord(opportunite):
                     {"name": "Coût Vinted", "value": f"{calcul['cout_achat']:.2f} €", "inline": True},
                     {"name": "Revente prudente", "value": f"{calcul['prix_revente_prudent']:.2f} €", "inline": True},
                     {"name": "Marge / ROI", "value": f"{calcul['marge']:.2f} € / {calcul['roi']:.1f} %", "inline": True},
+                    {
+                        "name": "Vendeur Vinted",
+                        "value": (
+                            f"{vendeur['nom']} — {vendeur['note']:.1f}/5 "
+                            f"({vendeur['evaluations']} évaluations)"
+                        ),
+                        "inline": False,
+                    },
                 ],
                 "thumbnail": {"url": annonce.get("image_hd") or annonce["image"]}
                 if annonce.get("image_hd") or annonce.get("image")
                 else None,
-                "footer": {"text": "Vérifie toujours l'authenticité et les photos avant l'achat."},
+                "footer": {
+                    "text": (
+                        "La note réduit le risque sans garantir l'authenticité. "
+                        "Achète uniquement via Vinted."
+                    )
+                },
             }
         ],
         "components": [
             {
                 "type": 1,
                 "components": [
-                    {"type": 2, "style": 5, "label": "Voir sur Vinted", "url": annonce["url"]}
+                    {"type": 2, "style": 5, "label": "Voir l'annonce", "url": annonce["url"]},
+                    {"type": 2, "style": 5, "label": "Voir le vendeur", "url": vendeur["profil_url"]},
                 ],
             }
         ],
@@ -197,6 +214,10 @@ def analyser_annonces(
     marge_minimum,
     roi_minimum,
     utiliser_ocr=True,
+    verifier_vendeurs=True,
+    note_vendeur_minimum=4.8,
+    evaluations_vendeur_minimum=10,
+    chargeur_vendeur=telecharger_vendeur_public,
 ):
     opportunites = []
     statistiques = {
@@ -205,6 +226,7 @@ def analyser_annonces(
         "langue_non_confirmee": 0,
         "sans_prix": 0,
         "marge_insuffisante": 0,
+        "vendeur_non_fiable": 0,
         "opportunites": 0,
     }
 
@@ -248,12 +270,24 @@ def analyser_annonces(
             statistiques["marge_insuffisante"] += 1
             continue
 
+        vendeur = None
+        if verifier_vendeurs:
+            vendeur = chargeur_vendeur(annonce)
+            if not vendeur_est_fiable(
+                vendeur,
+                note_minimum=note_vendeur_minimum,
+                evaluations_minimum=evaluations_vendeur_minimum,
+            ):
+                statistiques["vendeur_non_fiable"] += 1
+                continue
+
         opportunites.append(
             {
                 "annonce": annonce,
                 "correspondance": correspondance,
                 "langue": langue,
                 "calcul": calcul,
+                "vendeur": vendeur,
             }
         )
 
@@ -268,6 +302,18 @@ def construire_parser():
     parser.add_argument("--shipping", type=float, default=2.88)
     parser.add_argument("--min-margin", type=float, default=8.0)
     parser.add_argument("--min-roi", type=float, default=30.0)
+    parser.add_argument(
+        "--min-seller-rating",
+        type=float,
+        default=4.8,
+        help="note vendeur minimale sur 5 (défaut : 4.8)",
+    )
+    parser.add_argument(
+        "--min-seller-reviews",
+        type=int,
+        default=10,
+        help="nombre minimal d'évaluations vendeur (défaut : 10)",
+    )
     parser.add_argument("--discord", action="store_true")
     parser.add_argument("--remember", action="store_true")
     parser.add_argument(
@@ -320,6 +366,8 @@ def executer_cycle(args, webhook=""):
         marge_minimum=max(0, args.min_margin),
         roi_minimum=max(0, args.min_roi),
         utiliser_ocr=not args.no_ocr,
+        note_vendeur_minimum=min(5.0, max(0.0, args.min_seller_rating)),
+        evaluations_vendeur_minimum=max(0, args.min_seller_reviews),
     )
 
     age_guide = age_source_heures(guide)
@@ -335,11 +383,17 @@ def executer_cycle(args, webhook=""):
         print(f"🔗 {statistiques['sans_correspondance']} sans correspondance exacte")
         print(f"🇫🇷 {statistiques['langue_non_confirmee']} langue non confirmée")
         print(f"💶 {statistiques['marge_insuffisante']} marge insuffisante")
+        print(f"🛡️ {statistiques['vendeur_non_fiable']} vendeur(s) écarté(s)")
         print(f"✅ {statistiques['opportunites']} opportunité(s)")
         for opportunite in opportunites:
             calcul = opportunite["calcul"]
             print(f"\n{opportunite['annonce']['titre']}")
             print(f"  Marge : {calcul['marge']:.2f} € — ROI : {calcul['roi']:.1f} %")
+            vendeur = opportunite["vendeur"]
+            print(
+                f"  Vendeur : {vendeur['nom']} — {vendeur['note']:.1f}/5 "
+                f"({vendeur['evaluations']} évaluations)"
+            )
             print(f"  {opportunite['annonce']['url']}")
 
     if args.discord and opportunites:
