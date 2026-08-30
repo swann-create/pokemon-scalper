@@ -21,10 +21,11 @@ from cardmarket_data import (
 )
 from tcgdex_matcher import chercher_carte, langue_depuis_ocr, normaliser
 from vinted_probe import (
+    RECHERCHES_CARTES,
     VintedIndisponible,
     charger_ids_vus,
     memoriser_ids,
-    telecharger_catalogue,
+    telecharger_catalogues,
     telecharger_vendeur_public,
     vendeur_est_fiable,
 )
@@ -218,6 +219,7 @@ def analyser_annonces(
     note_vendeur_minimum=4.8,
     evaluations_vendeur_minimum=10,
     chargeur_vendeur=telecharger_vendeur_public,
+    notifier_opportunite=None,
 ):
     opportunites = []
     statistiques = {
@@ -281,15 +283,18 @@ def analyser_annonces(
                 statistiques["vendeur_non_fiable"] += 1
                 continue
 
-        opportunites.append(
-            {
-                "annonce": annonce,
-                "correspondance": correspondance,
-                "langue": langue,
-                "calcul": calcul,
-                "vendeur": vendeur,
-            }
-        )
+        opportunite = {
+            "annonce": annonce,
+            "correspondance": correspondance,
+            "langue": langue,
+            "calcul": calcul,
+            "vendeur": vendeur,
+        }
+        opportunites.append(opportunite)
+        if notifier_opportunite:
+            # L'alerte part dès que l'annonce récente est validée, sans attendre
+            # la fin de toutes les reconnaissances OCR du passage.
+            notifier_opportunite(opportunite)
 
     statistiques["opportunites"] = len(opportunites)
     return opportunites, statistiques
@@ -297,8 +302,21 @@ def analyser_annonces(
 
 def construire_parser():
     parser = argparse.ArgumentParser(description="Détecte les cartes Vinted sous-évaluées")
-    parser.add_argument("--query", default="carte pokemon")
-    parser.add_argument("--limit", type=int, default=30)
+    parser.add_argument(
+        "--query",
+        action="append",
+        dest="queries",
+        help=(
+            "recherche Vinted à surveiller ; répétable. Par défaut, quatre "
+            "recherches générales et ciblées sont utilisées"
+        ),
+    )
+    parser.add_argument(
+        "--limit",
+        type=int,
+        default=40,
+        help="nombre d'annonces les plus récentes par recherche (maximum 96)",
+    )
     parser.add_argument("--shipping", type=float, default=2.88)
     parser.add_argument("--min-margin", type=float, default=8.0)
     parser.add_argument("--min-roi", type=float, default=30.0)
@@ -355,7 +373,11 @@ def lire_variable_env_locale(nom):
 def executer_cycle(args, webhook=""):
     guide = charger_guide(GUIDE_FILE)
     guide_index = indexer_guide(guide)
-    annonces = telecharger_catalogue(args.query, limite=max(1, min(96, args.limit)))
+    recherches = args.queries or list(RECHERCHES_CARTES)
+    annonces = telecharger_catalogues(
+        recherches,
+        limite=max(1, min(96, args.limit)),
+    )
 
     ids_vus = charger_ids_vus(ARBITRAGE_STATE_FILE)
     nouvelles = [annonce for annonce in annonces if annonce["id"] not in ids_vus]
@@ -368,17 +390,26 @@ def executer_cycle(args, webhook=""):
         utiliser_ocr=not args.no_ocr,
         note_vendeur_minimum=min(5.0, max(0.0, args.min_seller_rating)),
         evaluations_vendeur_minimum=max(0, args.min_seller_reviews),
+        notifier_opportunite=(
+            (lambda opportunite: envoyer_discord(webhook, opportunite))
+            if args.discord
+            else None
+        ),
     )
 
     age_guide = age_source_heures(guide)
     resultat = {
         "guide_cardmarket_age_heures": round(age_guide, 1) if age_guide is not None else None,
+        "recherches": recherches,
+        "annonces_catalogue_uniques": len(annonces),
         "statistiques": statistiques,
         "opportunites": opportunites,
     }
     if args.json:
         print(json.dumps(resultat, indent=2, ensure_ascii=False))
     else:
+        print(f"🌐 {len(recherches)} recherche(s) surveillée(s)")
+        print(f"🆕 {len(annonces)} annonce(s) récente(s) unique(s) trouvée(s)")
         print(f"🔎 {statistiques['annonces']} nouvelle(s) analysée(s)")
         print(f"🔗 {statistiques['sans_correspondance']} sans correspondance exacte")
         print(f"🇫🇷 {statistiques['langue_non_confirmee']} langue non confirmée")
@@ -395,10 +426,6 @@ def executer_cycle(args, webhook=""):
                 f"({vendeur['evaluations']} évaluations)"
             )
             print(f"  {opportunite['annonce']['url']}")
-
-    if args.discord and opportunites:
-        for opportunite in opportunites:
-            envoyer_discord(webhook, opportunite)
 
     if args.remember:
         memoriser_ids(

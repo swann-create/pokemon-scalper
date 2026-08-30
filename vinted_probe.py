@@ -27,6 +27,12 @@ HEADERS = {
     "Accept-Language": "fr-FR,fr;q=0.9",
 }
 STATUTS_BLOQUANTS = {401, 403, 429}
+RECHERCHES_CARTES = (
+    "carte pokemon",
+    "carte pokemon ex",
+    "carte pokemon illustration rare",
+    "carte pokemon alternative",
+)
 
 MARQUEUR_ID = re.compile(r"^product-item-id-(\d+)--overlay-link$")
 IMAGE_HD = re.compile(r'\\"photos\\":\[\{\\"url\\":\\"(.+?)\\"')
@@ -249,6 +255,46 @@ def telecharger_catalogue(requete, limite=20, timeout=20):
             "Aucune annonce structurée trouvée ; la page a changé ou l'accès est limité."
         )
     return annonces
+
+
+def fusionner_catalogues_recents(catalogues):
+    """Entrelace les résultats triés par Vinted et retire les doublons.
+
+    Chaque catalogue est déjà demandé avec ``newest_first``. L'entrelacement
+    fait passer le résultat n°1 de chaque recherche avant les résultats n°2,
+    afin qu'une recherche ciblée ne soit pas bloquée derrière la recherche
+    générale.
+    """
+    resultat = []
+    ids_vus = set()
+    profondeur = max((len(annonces) for _, annonces in catalogues), default=0)
+
+    for rang in range(profondeur):
+        for requete, annonces in catalogues:
+            if rang >= len(annonces):
+                continue
+            annonce = annonces[rang]
+            identifiant = str(annonce["id"])
+            if identifiant in ids_vus:
+                continue
+            annonce = dict(annonce)
+            annonce["requete_source"] = requete
+            resultat.append(annonce)
+            ids_vus.add(identifiant)
+    return resultat
+
+
+def telecharger_catalogues(requetes, limite=40, timeout=20):
+    """Télécharge plusieurs recherches publiques, sans pagination ni reprise."""
+    catalogues = []
+    for requete in dict.fromkeys(requete.strip() for requete in requetes):
+        if not requete:
+            continue
+        annonces = telecharger_catalogue(requete, limite=limite, timeout=timeout)
+        catalogues.append((requete, annonces))
+    if not catalogues:
+        raise ValueError("au moins une recherche Vinted est requise")
+    return fusionner_catalogues_recents(catalogues)
 
 
 def charger_ids_vus(chemin):
